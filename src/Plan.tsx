@@ -1,24 +1,32 @@
 "use client";
 
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useRef, useCallback } from "react";
 import {
   CheckCircle2,
   Circle,
+  CircleAlert,
   CircleDotDashed,
+  CircleX,
   Zap,
   Loader2,
   BrainCircuit,
-  Trash2,
-  Plus,
-  Edit2,
-  Download,
-  Trash,
-  History,
   X,
-  GripVertical,
   Compass,
+  Paperclip,
+  PlusIcon,
+  ArrowUpIcon,
+  ImageIcon,
+  Figma,
+  FileUp,
+  MonitorIcon,
+  CircleUserRound,
 } from "lucide-react";
-import { motion, AnimatePresence, LayoutGroup, Reorder } from "framer-motion";
+import { motion, AnimatePresence, LayoutGroup } from "framer-motion";
+
+// --- Utility function replacing "@/lib/utils" ---
+function cn(...classes: (string | undefined | null | false)[]) {
+  return classes.filter(Boolean).join(" ");
+}
 
 // --- Types ---
 interface Subtask {
@@ -27,7 +35,7 @@ interface Subtask {
   description: string;
   status: string;
   priority: string;
-  timeEstimate?: string;
+  tools?: string[];
 }
 interface Task {
   id: string;
@@ -36,7 +44,7 @@ interface Task {
   status: string;
   priority: string;
   level: number;
-  timeEstimate?: string;
+  dependencies: string[];
   subtasks: Subtask[];
 }
 interface Flashcard {
@@ -44,11 +52,25 @@ interface Flashcard {
   front: string;
   back: string;
 }
-interface HistoryItem {
-  id: string;
-  prompt: string;
-  date: string;
-  tasks: Task[];
+
+// --- Hook: Auto-resize Textarea ---
+function useAutoResizeTextarea(minHeight: number, maxHeight: number) {
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const adjustHeight = useCallback(
+    (reset?: boolean) => {
+      const textarea = textareaRef.current;
+      if (!textarea) return;
+      textarea.style.height = `${minHeight}px`;
+      if (reset) return;
+      const newHeight = Math.max(
+        minHeight,
+        Math.min(textarea.scrollHeight, maxHeight),
+      );
+      textarea.style.height = `${newHeight}px`;
+    },
+    [minHeight, maxHeight],
+  );
+  return { textareaRef, adjustHeight };
 }
 
 export default function Plan() {
@@ -56,72 +78,48 @@ export default function Plan() {
   const [tasks, setTasks] = useState<Task[]>([]);
   const [prompt, setPrompt] = useState("");
   const [isSyncing, setIsSyncing] = useState(false);
+  const [thinkPhase, setThinkPhase] = useState<number>(0);
+  const [agentError, setAgentError] = useState<string | null>(null);
+
+  // Flashcards
+  const [showDeck, setShowDeck] = useState(false);
+  const [isFlipped, setIsFlipped] = useState(false);
+  const [cardQueue, setCardQueue] = useState<Flashcard[]>([]);
+  const [activeTaskTitle, setActiveTaskTitle] = useState("");
 
   // UI State
   const [expandedTasks, setExpandedTasks] = useState<string[]>([]);
   const [expandedSubtasks, setExpandedSubtasks] = useState<{
     [key: string]: boolean;
   }>({});
-  const [editingId, setEditingId] = useState<string | null>(null);
-  const [editValue, setEditValue] = useState("");
+  const { textareaRef, adjustHeight } = useAutoResizeTextarea(60, 200);
 
-  // Sidebar & Config State
-  const [showHistory, setShowHistory] = useState(false);
-  const [history, setHistory] = useState<HistoryItem[]>([]);
-  const [numCards, setNumCards] = useState(5);
+  const prefersReducedMotion =
+    typeof window !== "undefined"
+      ? window.matchMedia("(prefers-reduced-motion: reduce)").matches
+      : false;
 
-  // Flashcard (Anki) State
-  const [isGeneratingCards, setIsGeneratingCards] = useState<string | null>(
-    null,
-  );
-  const [showDeck, setShowDeck] = useState(false);
-  const [isFlipped, setIsFlipped] = useState(false);
-  const [cardQueue, setCardQueue] = useState<Flashcard[]>([]);
-  const [deckStats, setDeckStats] = useState({ total: 0, reviews: 0 });
+  // --- AGENTIC SYNC FLOW ---
+  const handleAtlasSync = async (overridePrompt?: string) => {
+    const finalPrompt = overridePrompt || prompt;
+    if (!finalPrompt.trim() || isSyncing) return;
 
-  // Progress Calculation
-  const totalSubtasks = tasks.reduce(
-    (acc, task) => acc + task.subtasks.length,
-    0,
-  );
-  const completedSubtasks = tasks.reduce(
-    (acc, task) =>
-      acc + task.subtasks.filter((s) => s.status === "completed").length,
-    0,
-  );
-  const progressPercent =
-    totalSubtasks === 0
-      ? 0
-      : Math.round((completedSubtasks / totalSubtasks) * 100);
-
-  // Load History on Mount
-  useEffect(() => {
-    const saved = localStorage.getItem("atlasHistory");
-    if (saved) setHistory(JSON.parse(saved));
-  }, []);
-
-  // Save History
-  const saveToHistory = (newTasks: Task[], currentPrompt: string) => {
-    const newItem = {
-      id: crypto.randomUUID(),
-      prompt: currentPrompt,
-      date: new Date().toLocaleDateString(),
-      tasks: newTasks,
-    };
-    const updated = [newItem, ...history].slice(0, 10);
-    setHistory(updated);
-    localStorage.setItem("atlasHistory", JSON.stringify(updated));
-  };
-
-  // --- AGENTIC LOGIC: GENERATE ATLAS PLAN ---
-  const handleGeneratePlan = async (promptToUse: string = prompt) => {
-    if (!promptToUse.trim()) return;
     setIsSyncing(true);
     setTasks([]);
+    setShowDeck(false);
+    setAgentError(null);
+
+    // 1. UI Feedback: Faking the steps you requested
+    setThinkPhase(1); // Searching Project Requirements
+    await new Promise((r) => setTimeout(r, 1200));
+    setThinkPhase(2); // Planning Course Structure
 
     try {
       const apiKey = (import.meta as any).env.VITE_GROQ_API_KEY;
-      const response = await fetch(
+      if (!apiKey) throw new Error("Missing API Key in .env file.");
+
+      // Fetch Roadmap
+      const roadmapResponse = await fetch(
         "https://api.groq.com/openai/v1/chat/completions",
         {
           method: "POST",
@@ -130,48 +128,41 @@ export default function Plan() {
             "Content-Type": "application/json",
           },
           body: JSON.stringify({
-            model: "llama-3.1-8b-instant",
+            model: "llama-3.3-70b-versatile",
             messages: [
               {
                 role: "system",
-                content: `You are ATLAS, an advanced tactical planner. Output ONLY a raw JSON array. 
-              CRITICAL INSTRUCTION: You MUST generate AT LEAST 4 to 6 major tasks. Do NOT generate just one task. Each task MUST contain 2 to 4 subtasks.
-              Structure:[{"id": "uuid", "title": "...", "description": "...", "status": "pending", "priority": "high|medium|low", "timeEstimate": "e.g. 2h", "level": 0, "subtasks":[{"id": "uuid", "title": "...", "description": "...", "status": "pending", "priority": "high|medium|low", "timeEstimate": "e.g. 30m"}]}]`,
+                content:
+                  "Output ONLY a raw JSON array of 4 tasks. Structure:[{id, title, description, status:'pending', priority:'high', level:0, dependencies:[], subtasks:[{id, title, description, status:'pending', priority:'high', tools:[]}]}]",
               },
               {
                 role: "user",
-                content: `Generate a comprehensive, multi-phase roadmap for: ${promptToUse}`,
+                content: `Create detailed study roadmap for: ${finalPrompt}`,
               },
             ],
-            temperature: 0.3, // Slightly higher to allow for more creative multi-step planning
+            temperature: 0.2,
           }),
         },
       );
 
-      const data = await response.json();
-      const jsonMatch = data.choices[0].message.content.match(/\[[\s\S]*\]/);
-      const newPlan: Task[] = JSON.parse(jsonMatch[0]);
+      const roadmapData = await roadmapResponse.json();
+      if (roadmapData.error) throw new Error(roadmapData.error.message);
 
+      // CRASH PREVENTION: Safely parse the JSON
+      const content = roadmapData.choices[0].message.content;
+      const rmMatch = content.match(/\[[\s\S]*?\]/);
+      if (!rmMatch)
+        throw new Error("AI failed to generate a valid data structure.");
+
+      const newPlan: Task[] = JSON.parse(rmMatch[0]);
       setTasks(newPlan);
-      // Auto-expand the first two tasks so the user sees the generated data immediately
-      if (newPlan.length > 0)
-        setExpandedTasks(newPlan.slice(0, 2).map((t) => t.id));
-      saveToHistory(newPlan, promptToUse);
-      setPrompt("");
-    } catch (error) {
-      console.error("ATLAS Gen Error:", error);
-    } finally {
-      setIsSyncing(false);
-    }
-  };
+      setExpandedTasks([newPlan[0].id]); // Auto expand first task
 
-  // --- AGENTIC LOGIC: GENERATE FLASHCARDS ---
-  const handleGenerateFlashcards = async (task: Task, e: React.MouseEvent) => {
-    e.stopPropagation();
-    setIsGeneratingCards(task.id);
-    try {
-      const apiKey = (import.meta as any).env.VITE_GROQ_API_KEY;
-      const response = await fetch(
+      // Fetch Flashcards automatically for the first task
+      setThinkPhase(3); // Generating Flashcards
+      setActiveTaskTitle(newPlan[0].title);
+
+      const fcResponse = await fetch(
         "https://api.groq.com/openai/v1/chat/completions",
         {
           method: "POST",
@@ -184,11 +175,12 @@ export default function Plan() {
             messages: [
               {
                 role: "system",
-                content: `Output ONLY a raw JSON array of objects:[{"id": "uuid", "front": "Question...", "back": "Answer..."}]`,
+                content:
+                  "Output ONLY a raw JSON array of 5 flashcards: [{id, front, back}]",
               },
               {
                 role: "user",
-                content: `Create ${numCards} spaced-repetition flashcards for topic: ${task.title}. Context: ${task.description}`,
+                content: `Create flashcards for: ${newPlan[0].title}`,
               },
             ],
             temperature: 0.3,
@@ -196,161 +188,47 @@ export default function Plan() {
         },
       );
 
-      const data = await response.json();
-      const jsonMatch = data.choices[0].message.content.match(/\[[\s\S]*\]/);
-      const newCards: Flashcard[] = JSON.parse(jsonMatch[0]);
-
-      setCardQueue(newCards);
-      setDeckStats({ total: newCards.length, reviews: 0 });
-      setIsFlipped(false);
-      setShowDeck(true);
-    } catch (error) {
-      console.error("Flashcard Gen Error:", error);
+      const fcData = await fcResponse.json();
+      const fcMatch = fcData.choices[0].message.content.match(/\[[\s\S]*\]/);
+      if (fcMatch) {
+        setCardQueue(JSON.parse(fcMatch[0]));
+        setShowDeck(true); // Slide deck in on the right
+      }
+    } catch (error: any) {
+      console.error("Atlas Crash Prevented:", error);
+      setAgentError(error.message || "Neural link failed. Please try again.");
     } finally {
-      setIsGeneratingCards(null);
+      setIsSyncing(false);
+      setThinkPhase(0);
+      setPrompt("");
+      adjustHeight(true);
     }
   };
 
-  // --- FLASHCARD SRS LOGIC ---
-  const handleScoreCard = (
-    action: "again" | "hard" | "good" | "easy" | "skip",
-  ) => {
-    if (cardQueue.length === 0) return;
-
-    // Smoothly flip back to front before changing the card
+  const handleScoreCard = (action: string) => {
     setIsFlipped(false);
-
     setTimeout(() => {
-      const currentCard = cardQueue[0];
       const newQueue = [...cardQueue.slice(1)];
-
-      setDeckStats((s) => ({ ...s, reviews: s.reviews + 1 }));
-
-      if (action === "again") {
-        newQueue.splice(Math.min(1, newQueue.length), 0, currentCard);
-      } else if (action === "hard" || action === "skip") {
-        newQueue.push(currentCard);
-      }
-      // Good or Easy drops the card entirely
-
+      if (action === "again" || action === "hard") newQueue.push(cardQueue[0]);
       setCardQueue(newQueue);
-    }, 200); // Wait 200ms for the card to physically turn around before changing text
+      if (newQueue.length === 0) setShowDeck(false);
+    }, 200);
   };
 
-  // Keyboard Shortcuts for Flashcards
-  useEffect(() => {
-    const handleKeyDown = (e: KeyboardEvent) => {
-      if (!showDeck || cardQueue.length === 0) return;
-      if (e.code === "Space") {
-        e.preventDefault();
-        setIsFlipped((prev) => !prev);
-      }
-      if (isFlipped) {
-        if (e.key === "1") handleScoreCard("again");
-        if (e.key === "2") handleScoreCard("hard");
-        if (e.key === "3") handleScoreCard("good");
-        if (e.key === "4") handleScoreCard("easy");
-        if (e.key === "s" || e.key === "S") handleScoreCard("skip");
-      }
-    };
-    window.addEventListener("keydown", handleKeyDown);
-    return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [showDeck, isFlipped, cardQueue]);
-
-  // --- CRUD & UI ACTIONS ---
-  const handleExport = () => {
-    const blob = new Blob([JSON.stringify(tasks, null, 2)], {
-      type: "application/json",
-    });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = `ATLAS_Plan_${new Date().toISOString().split("T")[0]}.json`;
-    a.click();
-  };
-
-  const addTask = () =>
-    setTasks([
-      ...tasks,
-      {
-        id: crypto.randomUUID(),
-        title: "New Atlas Node",
-        description: "Edit description...",
-        status: "pending",
-        priority: "medium",
-        level: 0,
-        subtasks: [],
-      },
-    ]);
-  const addSubtask = (taskId: string, e: React.MouseEvent) => {
-    e.stopPropagation();
-    setTasks((p) =>
-      p.map((t) =>
-        t.id === taskId
-          ? {
-              ...t,
-              subtasks: [
-                ...t.subtasks,
-                {
-                  id: crypto.randomUUID(),
-                  title: "New Subtask",
-                  description: "",
-                  status: "pending",
-                  priority: "medium",
-                },
-              ],
-            }
-          : t,
-      ),
+  // UI Toggles (Original Architecture)
+  const toggleTaskExpansion = (id: string) =>
+    setExpandedTasks((p) =>
+      p.includes(id) ? p.filter((i) => i !== id) : [...p, id],
     );
-    if (!expandedTasks.includes(taskId))
-      setExpandedTasks([...expandedTasks, taskId]);
-  };
-
-  const deleteTask = (taskId: string, e: React.MouseEvent) => {
-    e.stopPropagation();
-    setTasks((p) => p.filter((t) => t.id !== taskId));
-  };
-  const deleteSubtask = (
-    taskId: string,
-    subtaskId: string,
-    e: React.MouseEvent,
-  ) => {
-    e.stopPropagation();
+  const toggleSubtaskExpansion = (tid: string, sid: string) =>
+    setExpandedSubtasks((p) => ({
+      ...p,
+      [`${tid}-${sid}`]: !p[`${tid}-${sid}`],
+    }));
+  const toggleTaskStatus = (id: string) =>
     setTasks((p) =>
       p.map((t) =>
-        t.id === taskId
-          ? { ...t, subtasks: t.subtasks.filter((s) => s.id !== subtaskId) }
-          : t,
-      ),
-    );
-  };
-
-  const saveEdit = (id: string, isSubtask: boolean, parentId?: string) => {
-    if (isSubtask && parentId) {
-      setTasks((p) =>
-        p.map((t) =>
-          t.id === parentId
-            ? {
-                ...t,
-                subtasks: t.subtasks.map((s) =>
-                  s.id === id ? { ...s, title: editValue } : s,
-                ),
-              }
-            : t,
-        ),
-      );
-    } else
-      setTasks((p) =>
-        p.map((t) => (t.id === id ? { ...t, title: editValue } : t)),
-      );
-    setEditingId(null);
-  };
-
-  const toggleTaskStatus = (taskId: string) =>
-    setTasks((p) =>
-      p.map((t) =>
-        t.id === taskId
+        t.id === id
           ? {
               ...t,
               status: t.status === "completed" ? "pending" : "completed",
@@ -362,12 +240,12 @@ export default function Plan() {
           : t,
       ),
     );
-  const toggleSubtaskStatus = (taskId: string, subtaskId: string) =>
+  const toggleSubtaskStatus = (tid: string, sid: string) =>
     setTasks((p) =>
       p.map((t) => {
-        if (t.id === taskId) {
-          const updated = t.subtasks.map((s) =>
-            s.id === subtaskId
+        if (t.id === tid) {
+          const u = t.subtasks.map((s) =>
+            s.id === sid
               ? {
                   ...s,
                   status: s.status === "completed" ? "pending" : "completed",
@@ -376,8 +254,8 @@ export default function Plan() {
           );
           return {
             ...t,
-            subtasks: updated,
-            status: updated.every((s) => s.status === "completed")
+            subtasks: u,
+            status: u.every((s) => s.status === "completed")
               ? "completed"
               : t.status,
           };
@@ -386,634 +264,568 @@ export default function Plan() {
       }),
     );
 
-  const getPriorityColor = (p: string) =>
-    p.toLowerCase() === "high"
-      ? "bg-[#F72585] shadow-[0_0_10px_#F72585]"
-      : p.toLowerCase() === "medium"
-        ? "bg-[#B5179E]"
-        : "bg-[#7209B7]";
+  // Animation Variants
+  const taskVariants = {
+    hidden: { opacity: 0, y: -5 },
+    visible: {
+      opacity: 1,
+      y: 0,
+      transition: { type: "spring", stiffness: 500, damping: 30 },
+    },
+  };
+  const subtaskListVariants = {
+    hidden: { opacity: 0, height: 0 },
+    visible: { height: "auto", opacity: 1, transition: { duration: 0.25 } },
+  };
+
+  const hasStarted = tasks.length > 0 || isSyncing;
 
   return (
-    <div className="flex h-screen bg-[#050505] text-zinc-300 font-sans selection:bg-[#B5179E]/40 overflow-hidden relative">
-      {/* --- SIDEBAR: HISTORY --- */}
-      <AnimatePresence>
-        {showHistory && (
-          <motion.div
-            initial={{ width: 0, opacity: 0 }}
-            animate={{ width: 300, opacity: 1 }}
-            exit={{ width: 0, opacity: 0 }}
-            className="h-full border-r border-[#3A0CA3]/30 bg-[#0a0a0c] flex flex-col z-20 whitespace-nowrap overflow-hidden hidden md:flex"
-          >
-            <div className="p-4 border-b border-[#3A0CA3]/30 flex justify-between items-center text-[#F72585] font-black tracking-widest uppercase">
-              <span>Atlas Logs</span>
-              <X
-                className="cursor-pointer hover:text-white"
-                size={18}
-                onClick={() => setShowHistory(false)}
-              />
-            </div>
-            <div className="flex-1 overflow-y-auto p-2 space-y-2">
-              {history.map((item) => (
-                <div
-                  key={item.id}
-                  onClick={() => setTasks(item.tasks)}
-                  className="p-3 bg-white/5 hover:bg-[#3A0CA3]/20 rounded-lg cursor-pointer border border-transparent hover:border-[#560BAD]/50 transition-all"
+    <div className="flex flex-col h-screen bg-[#050505] text-zinc-100 font-sans selection:bg-[#F72585]/30 overflow-hidden">
+      {/* HEADER */}
+      <header className="px-6 py-4 flex items-center gap-3 border-b border-white/5 bg-[#0a0a0c]/80 backdrop-blur-md z-10 shrink-0">
+        <div className="flex items-center gap-2 p-2 rounded-lg bg-gradient-to-r from-[#560BAD]/10 to-[#F72585]/10 border border-white/10">
+          <Compass
+            className="text-[#F72585] drop-shadow-lg"
+            size={28}
+            strokeWidth={2.5}
+          />
+          <span className="text-xl font-black tracking-[0.2em] uppercase text-transparent bg-clip-text bg-gradient-to-r from-[#560BAD] to-[#F72585]">
+            Atlas
+          </span>
+        </div>
+      </header>
+
+      {/* MAIN LAYOUT (Split Screen) */}
+      <div className="flex-1 flex overflow-hidden relative">
+        {/* CENTER: CHAT OR ROADMAP */}
+        <main
+          className={cn(
+            "flex-1 flex flex-col transition-all duration-500",
+            showDeck ? "mr-[400px]" : "mr-0",
+          )}
+        >
+          <div className="flex-1 overflow-y-auto p-4 md:p-8 custom-scrollbar">
+            <div
+              className={cn(
+                "w-full max-w-4xl mx-auto transition-all duration-500",
+                !hasStarted ? "mt-[10vh]" : "mt-0",
+              )}
+            >
+              {/* THE V0 HERO STATE */}
+              {!hasStarted && (
+                <motion.div
+                  initial={{ opacity: 0, y: 20 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  className="flex flex-col items-center w-full mb-12"
                 >
-                  <div className="text-xs text-zinc-400 mb-1">{item.date}</div>
-                  <div className="text-sm text-zinc-100 truncate">
-                    {item.prompt}
+                  <h1 className="text-3xl md:text-5xl font-bold text-white mb-8 tracking-tight">
+                    What can I help you map?
+                  </h1>
+                </motion.div>
+              )}
+
+              {/* V0 INPUT COMPONENT (Moves to bottom when active) */}
+              <motion.div
+                layout
+                className={cn(
+                  "w-full transition-all duration-700",
+                  hasStarted
+                    ? "fixed bottom-6 left-1/2 -translate-x-1/2 max-w-3xl z-50 px-4"
+                    : "",
+                )}
+              >
+                <div className="bg-[#111113] rounded-2xl border border-white/10 shadow-2xl overflow-hidden">
+                  <div className="overflow-y-auto custom-scrollbar">
+                    <textarea
+                      ref={textareaRef}
+                      value={prompt}
+                      onChange={(e) => {
+                        setPrompt(e.target.value);
+                        adjustHeight();
+                      }}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter" && !e.shiftKey) {
+                          e.preventDefault();
+                          handleAtlasSync();
+                        }
+                      }}
+                      placeholder="Ask Atlas to generate a learning trajectory..."
+                      disabled={isSyncing}
+                      className="w-full px-5 py-4 resize-none bg-transparent border-none text-white text-sm focus:outline-none placeholder:text-zinc-500 min-h-[60px]"
+                    />
+                  </div>
+                  <div className="flex items-center justify-between p-3 border-t border-white/5 bg-[#111113]">
+                    <div className="flex items-center gap-2">
+                      <button className="p-2 hover:bg-zinc-800 rounded-lg transition-colors text-zinc-400 hover:text-white flex items-center gap-1">
+                        <Paperclip size={16} />{" "}
+                        <span className="text-xs hidden sm:block">Attach</span>
+                      </button>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <button className="px-3 py-1.5 rounded-lg text-xs font-medium text-zinc-400 transition-colors border border-dashed border-zinc-700 hover:border-zinc-500 hover:bg-zinc-800 flex items-center gap-2">
+                        <PlusIcon size={14} /> Project
+                      </button>
+                      <button
+                        onClick={() => handleAtlasSync()}
+                        disabled={!prompt.trim() || isSyncing}
+                        className={cn(
+                          "p-2 rounded-lg transition-colors",
+                          prompt.trim()
+                            ? "bg-white text-black hover:bg-zinc-200"
+                            : "bg-zinc-800 text-zinc-500",
+                        )}
+                      >
+                        {isSyncing ? (
+                          <Loader2 size={16} className="animate-spin" />
+                        ) : (
+                          <ArrowUpIcon size={16} />
+                        )}
+                      </button>
+                    </div>
                   </div>
                 </div>
-              ))}
-            </div>
-          </motion.div>
-        )}
-      </AnimatePresence>
 
-      {/* --- MAIN CONTENT --- */}
-      <div className="flex-1 flex flex-col h-full overflow-hidden relative">
-        {/* TOP BAR & PROGRESS */}
-        <div className="px-6 py-4 border-b border-[#3A0CA3]/30 bg-[#0a0a0c]/80 backdrop-blur-md flex flex-wrap gap-4 justify-between items-center z-10">
-          <div className="flex items-center gap-4">
-            <button
-              onClick={() => setShowHistory(!showHistory)}
-              className="text-[#560BAD] hover:text-[#B5179E] transition-colors"
-            >
-              <History size={20} />
-            </button>
-            {/* BRANDING UPDATE: ATLAS WITH COMPASS ICON */}
-            <h1 className="text-xl font-black tracking-[0.2em] text-transparent bg-clip-text bg-gradient-to-r from-[#560BAD] via-[#B5179E] to-[#F72585] flex items-center gap-2 uppercase">
-              <Compass className="text-[#F72585]" size={24} strokeWidth={2.5} />{" "}
-              ATLAS
-            </h1>
-          </div>
+                {/* V0 Action Pills (Only visible initially) */}
+                {!hasStarted && (
+                  <div className="flex flex-wrap items-center justify-center gap-3 mt-6">
+                    <ActionButton
+                      icon={<ImageIcon size={14} />}
+                      label="Analyze Syllabus"
+                      onClick={() => setPrompt("Analyze Syllabus")}
+                    />
+                    <ActionButton
+                      icon={<MonitorIcon size={14} />}
+                      label="Learn React Basics"
+                      onClick={() => setPrompt("Learn React Basics")}
+                    />
+                    <ActionButton
+                      icon={<CircleUserRound size={14} />}
+                      label="Prepare for Interview"
+                      onClick={() => setPrompt("Prepare for Interview")}
+                    />
+                  </div>
+                )}
+              </motion.div>
 
-          {tasks.length > 0 && (
-            <div className="flex-1 max-w-md mx-4">
-              <div className="flex justify-between text-[10px] uppercase font-bold text-zinc-500 mb-1">
-                <span>Mission Progress</span>
-                <span className="text-[#F72585]">{progressPercent}%</span>
-              </div>
-              <div className="h-2 w-full bg-zinc-900 rounded-full overflow-hidden">
-                <motion.div
-                  initial={{ width: 0 }}
-                  animate={{ width: `${progressPercent}%` }}
-                  className="h-full bg-gradient-to-r from-[#7209B7] to-[#F72585] shadow-[0_0_10px_#F72585]"
-                />
-              </div>
-            </div>
-          )}
-
-          <div className="flex items-center gap-3">
-            <button
-              onClick={handleExport}
-              className="p-2 text-zinc-500 hover:text-[#F72585] transition-colors"
-              title="Export ATLAS JSON"
-            >
-              <Download size={18} />
-            </button>
-            <button
-              onClick={() => {
-                setTasks([]);
-                setPrompt("");
-              }}
-              className="p-2 text-zinc-500 hover:text-red-500 transition-colors"
-              title="Clear Grid"
-            >
-              <Trash size={18} />
-            </button>
-          </div>
-        </div>
-
-        <div className="flex-1 overflow-y-auto p-4 md:p-8 pb-32">
-          {/* INPUT BAR AREA */}
-          <div className="max-w-4xl mx-auto mb-10">
-            <form
-              onSubmit={(e) => {
-                e.preventDefault();
-                handleGeneratePlan();
-              }}
-              className="relative shadow-[0_0_40px_rgba(86,11,173,0.1)] group"
-            >
-              <input
-                type="text"
-                value={prompt}
-                onChange={(e) => setPrompt(e.target.value)}
-                disabled={isSyncing}
-                placeholder="Define ATLAS target trajectory..."
-                className="w-full bg-[#0a0a0c]/80 border border-[#3A0CA3]/50 rounded-2xl pl-6 pr-[140px] py-5 text-sm text-zinc-100 focus:outline-none focus:border-[#F72585] focus:ring-1 focus:ring-[#F72585] transition-all placeholder:text-zinc-600 backdrop-blur-xl"
-              />
-              <div className="absolute right-3 top-3 bottom-3 flex gap-2">
-                <select
-                  value={numCards}
-                  onChange={(e) => setNumCards(Number(e.target.value))}
-                  className="bg-[#3A0CA3]/20 border border-[#3A0CA3]/50 text-xs text-[#B5179E] rounded-lg px-2 outline-none hidden sm:block"
-                >
-                  <option value={3}>3 Cards</option>
-                  <option value={5}>5 Cards</option>
-                  <option value={10}>10 Cards</option>
-                </select>
-                <button
-                  type="submit"
-                  disabled={isSyncing || !prompt}
-                  className="px-6 bg-gradient-to-r from-[#7209B7] to-[#B5179E] hover:to-[#F72585] text-white text-xs font-black tracking-widest rounded-xl flex items-center gap-2 transition-all disabled:opacity-50"
-                >
-                  {isSyncing ? (
-                    <Loader2 size={16} className="animate-spin" />
-                  ) : (
-                    <Zap size={16} />
-                  )}{" "}
-                  SYNC
-                </button>
-              </div>
-            </form>
-
-            {/* Example Prompts */}
-            {tasks.length === 0 && !isSyncing && (
-              <div className="flex flex-wrap gap-2 justify-center mt-6">
-                {[
-                  "Master AWS Cloud Practitioner",
-                  "Build a Startup MVP",
-                  "Learn Data Structures in C++",
-                  "Outline a Novel",
-                ].map((ex) => (
-                  <button
-                    key={ex}
-                    onClick={() => handleGeneratePlan(ex)}
-                    className="text-[10px] px-3 py-1.5 rounded-full border border-zinc-800 text-zinc-500 hover:text-[#B5179E] hover:border-[#B5179E]/50 transition-all uppercase tracking-wider"
+              {/* AGENTIC LOADING SEQUENCE */}
+              <AnimatePresence>
+                {isSyncing && (
+                  <motion.div
+                    initial={{ opacity: 0 }}
+                    animate={{ opacity: 1 }}
+                    exit={{ opacity: 0 }}
+                    className="flex flex-col items-center justify-center py-20"
                   >
-                    {ex}
-                  </button>
-                ))}
-              </div>
-            )}
-          </div>
-
-          {/* EMPTY STATE */}
-          {tasks.length === 0 && !isSyncing && (
-            <div className="text-center py-20 opacity-30">
-              <Compass
-                size={80}
-                className="mx-auto mb-4 text-[#560BAD] opacity-50"
-              />
-              <h2 className="text-2xl font-black text-white tracking-[0.2em] uppercase">
-                Atlas Offline
-              </h2>
-              <p className="text-sm tracking-wider mt-2">
-                Awaiting coordinates to render strategic roadmap.
-              </p>
-            </div>
-          )}
-
-          {/* TASK LIST (DRAG & DROP) */}
-          <div className="max-w-4xl mx-auto">
-            <LayoutGroup>
-              <Reorder.Group
-                axis="y"
-                values={tasks}
-                onReorder={setTasks}
-                className="space-y-4"
-              >
-                {tasks.map((task) => {
-                  const isExpanded = expandedTasks.includes(task.id);
-                  const isCompleted = task.status === "completed";
-                  const groupCompleteGlow = isCompleted
-                    ? "shadow-[0_0_20px_rgba(34,197,94,0.15)] border-green-500/30"
-                    : "border-zinc-800/50";
-
-                  return (
-                    <Reorder.Item
-                      key={task.id}
-                      value={task}
-                      initial={{ opacity: 0, y: 10 }}
-                      animate={{ opacity: 1, y: 0 }}
-                      exit={{ opacity: 0 }}
-                    >
+                    <div className="flex items-center gap-8 text-zinc-500 text-xs font-bold uppercase tracking-widest">
                       <div
-                        className={`bg-[#0a0a0c] border rounded-2xl overflow-hidden transition-all duration-500 ${groupCompleteGlow}`}
+                        className={cn(
+                          "flex items-center gap-2 transition-colors duration-500",
+                          thinkPhase >= 1 ? "text-[#F72585]" : "",
+                        )}
                       >
-                        <div className="group flex items-center px-4 py-4 hover:bg-white/[0.02] transition-colors relative">
-                          <div className="mr-2 cursor-grab text-zinc-700 hover:text-[#B5179E] hidden sm:block">
-                            <GripVertical size={16} />
-                          </div>
-                          <div
-                            className={`w-2 h-2 rounded-full mr-3 ${getPriorityColor(task.priority)}`}
-                          />
+                        {thinkPhase === 1 ? (
+                          <Loader2 size={14} className="animate-spin" />
+                        ) : (
+                          <CheckCircle2 size={14} />
+                        )}{" "}
+                        Searching Requirements
+                      </div>
+                      <div
+                        className={cn(
+                          "flex items-center gap-2 transition-colors duration-500",
+                          thinkPhase >= 2 ? "text-[#B5179E]" : "opacity-30",
+                        )}
+                      >
+                        {thinkPhase === 2 ? (
+                          <Loader2 size={14} className="animate-spin" />
+                        ) : (
+                          <Circle size={14} />
+                        )}{" "}
+                        Planning Structure
+                      </div>
+                      <div
+                        className={cn(
+                          "flex items-center gap-2 transition-colors duration-500",
+                          thinkPhase >= 3 ? "text-[#7209B7]" : "opacity-30",
+                        )}
+                      >
+                        {thinkPhase === 3 ? (
+                          <Loader2 size={14} className="animate-spin" />
+                        ) : (
+                          <Circle size={14} />
+                        )}{" "}
+                        Generating Cards
+                      </div>
+                    </div>
+                  </motion.div>
+                )}
+              </AnimatePresence>
 
-                          <div
-                            className="mr-3 flex-shrink-0 cursor-pointer"
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              toggleTaskStatus(task.id);
-                            }}
-                          >
-                            <AnimatePresence mode="wait">
-                              {task.status === "completed" ? (
-                                <CheckCircle2 className="h-6 w-6 text-green-500 drop-shadow-[0_0_8px_rgba(34,197,94,0.5)]" />
-                              ) : task.status === "in-progress" ? (
-                                <CircleDotDashed className="h-6 w-6 text-[#F72585] animate-spin-slow drop-shadow-[0_0_8px_rgba(247,37,133,0.5)]" />
-                              ) : (
-                                <Circle className="text-zinc-700 h-6 w-6 hover:text-[#560BAD]" />
-                              )}
-                            </AnimatePresence>
-                          </div>
+              {/* ERROR MESSAGE */}
+              {agentError && (
+                <div className="p-4 bg-red-500/10 border border-red-500/30 text-red-400 rounded-xl mb-8 text-sm text-center">
+                  {agentError}
+                </div>
+              )}
 
-                          <div
-                            className="flex flex-grow items-center justify-between cursor-pointer"
-                            onClick={() =>
-                              setExpandedTasks((p) =>
-                                p.includes(task.id)
-                                  ? p.filter((id) => id !== task.id)
-                                  : [...p, task.id],
-                              )
-                            }
-                          >
-                            <div className="flex-1 truncate pr-4">
-                              {editingId === task.id ? (
-                                <input
-                                  autoFocus
-                                  value={editValue}
-                                  onChange={(e) => setEditValue(e.target.value)}
-                                  onBlur={() => saveEdit(task.id, false)}
-                                  onKeyDown={(e) =>
-                                    e.key === "Enter" &&
-                                    saveEdit(task.id, false)
-                                  }
-                                  className="bg-transparent border-b border-[#F72585] text-white outline-none w-full"
-                                  onClick={(e) => e.stopPropagation()}
-                                />
-                              ) : (
-                                <span
-                                  className={`font-semibold tracking-tight text-base sm:text-lg ${isCompleted ? "text-zinc-600 line-through" : "text-zinc-100"}`}
-                                >
-                                  {task.title}
-                                </span>
-                              )}
-                            </div>
+              {/* ORIGINAL PLANNING ARCHITECTURE (Restored Look) */}
+              {tasks.length > 0 && !isSyncing && (
+                <motion.div
+                  initial={{ opacity: 0 }}
+                  animate={{ opacity: 1 }}
+                  className="pb-40"
+                >
+                  <LayoutGroup>
+                    <div className="p-4 overflow-hidden">
+                      <ul className="space-y-2 overflow-hidden">
+                        {tasks.map((task, index) => {
+                          const isExpanded = expandedTasks.includes(task.id);
+                          const isCompleted = task.status === "completed";
 
-                            <div className="flex items-center space-x-2 sm:space-x-3 text-xs">
-                              {task.timeEstimate && (
-                                <span className="text-zinc-600 font-mono text-[10px] hidden sm:block">
-                                  {task.timeEstimate}
-                                </span>
-                              )}
-
-                              <button
-                                onClick={(e) =>
-                                  handleGenerateFlashcards(task, e)
-                                }
-                                className="group/btn relative flex items-center gap-1.5 px-3 py-1.5 bg-zinc-900 hover:bg-[#560BAD]/20 text-zinc-500 hover:text-[#B5179E] border border-zinc-800 hover:border-[#560BAD] rounded-lg transition-all"
-                                title="Generate Spaced Repetition Flashcards"
-                              >
-                                {isGeneratingCards === task.id ? (
-                                  <Loader2 size={12} className="animate-spin" />
-                                ) : (
-                                  <BrainCircuit size={12} />
-                                )}
-                                <span className="font-black text-[10px] uppercase tracking-widest hidden sm:block">
-                                  Deck
-                                </span>
-                              </button>
-
-                              <div className="opacity-0 group-hover:opacity-100 flex items-center gap-1 transition-opacity">
-                                <button
+                          return (
+                            <motion.li
+                              key={task.id}
+                              className={cn(index !== 0 ? "mt-2 pt-2" : "")}
+                              initial="hidden"
+                              animate="visible"
+                              variants={taskVariants}
+                            >
+                              {/* Task Row (Original Look) */}
+                              <motion.div className="group flex items-center px-3 py-2 rounded-lg hover:bg-white/[0.03] transition-colors cursor-pointer border border-transparent hover:border-white/5">
+                                <motion.div
+                                  className="mr-3 flex-shrink-0"
                                   onClick={(e) => {
                                     e.stopPropagation();
-                                    setEditValue(task.title);
-                                    setEditingId(task.id);
+                                    toggleTaskStatus(task.id);
                                   }}
-                                  className="p-1 hover:text-[#F72585]"
+                                  whileTap={{ scale: 0.9 }}
                                 >
-                                  <Edit2 size={14} />
-                                </button>
-                                <button
-                                  onClick={(e) => addSubtask(task.id, e)}
-                                  className="p-1 hover:text-[#B5179E]"
+                                  {isCompleted ? (
+                                    <CheckCircle2 className="h-5 w-5 text-emerald-500 drop-shadow-[0_0_5px_rgba(16,185,129,0.5)]" />
+                                  ) : task.status === "in-progress" ? (
+                                    <CircleDotDashed className="h-5 w-5 text-[#F72585] animate-spin-slow" />
+                                  ) : (
+                                    <Circle className="text-zinc-600 h-5 w-5 hover:text-[#560BAD]" />
+                                  )}
+                                </motion.div>
+
+                                <motion.div
+                                  className="flex min-w-0 flex-grow items-center justify-between"
+                                  onClick={() => toggleTaskExpansion(task.id)}
                                 >
-                                  <Plus size={16} />
-                                </button>
-                                <button
-                                  onClick={(e) => deleteTask(task.id, e)}
-                                  className="p-1 hover:text-red-500"
-                                >
-                                  <Trash2 size={14} />
-                                </button>
-                              </div>
-                            </div>
-                          </div>
-                        </div>
+                                  <div className="mr-2 flex-1 truncate">
+                                    <span
+                                      className={cn(
+                                        "text-base font-medium",
+                                        isCompleted
+                                          ? "text-zinc-600 line-through"
+                                          : "text-zinc-200",
+                                      )}
+                                    >
+                                      {task.title}
+                                    </span>
+                                  </div>
 
-                        {/* SUBTASKS */}
-                        <AnimatePresence>
-                          {isExpanded && task.subtasks.length > 0 && (
-                            <motion.div
-                              initial={{ height: 0, opacity: 0 }}
-                              animate={{ height: "auto", opacity: 1 }}
-                              exit={{ height: 0, opacity: 0 }}
-                              className="bg-black/40 border-t border-zinc-800/50"
-                            >
-                              <ul className="py-2 px-4 sm:pl-16 space-y-1">
-                                {task.subtasks.map((subtask) => (
-                                  <li
-                                    key={subtask.id}
-                                    className="group flex flex-col py-1.5"
-                                  >
-                                    <div className="flex items-center rounded-lg p-2 hover:bg-white/[0.03]">
-                                      <div
-                                        className={`w-1.5 h-1.5 rounded-full mr-3 opacity-50 ${getPriorityColor(subtask.priority)}`}
-                                      />
-                                      <div
-                                        className="mr-3 cursor-pointer"
-                                        onClick={() =>
-                                          toggleSubtaskStatus(
-                                            task.id,
-                                            subtask.id,
-                                          )
-                                        }
-                                      >
-                                        {subtask.status === "completed" ? (
-                                          <CheckCircle2 className="h-4 w-4 text-green-500" />
-                                        ) : (
-                                          <Circle className="text-zinc-700 h-4 w-4 hover:text-[#B5179E]" />
-                                        )}
-                                      </div>
-
-                                      <div className="flex-1 flex justify-between items-center pr-2">
-                                        {editingId === subtask.id ? (
-                                          <input
-                                            autoFocus
-                                            value={editValue}
-                                            onChange={(e) =>
-                                              setEditValue(e.target.value)
-                                            }
-                                            onBlur={() =>
-                                              saveEdit(
-                                                subtask.id,
-                                                true,
-                                                task.id,
-                                              )
-                                            }
-                                            onKeyDown={(e) =>
-                                              e.key === "Enter" &&
-                                              saveEdit(
-                                                subtask.id,
-                                                true,
-                                                task.id,
-                                              )
-                                            }
-                                            className="bg-transparent border-b border-[#F72585] text-white text-sm outline-none w-full"
-                                          />
-                                        ) : (
-                                          <span
-                                            className={`text-sm ${subtask.status === "completed" ? "text-zinc-600 line-through" : "text-zinc-300"}`}
-                                          >
-                                            {subtask.title}
-                                          </span>
-                                        )}
-
-                                        <div className="opacity-0 group-hover:opacity-100 flex items-center gap-2">
-                                          {subtask.timeEstimate && (
-                                            <span className="text-zinc-600 text-[10px] font-mono">
-                                              {subtask.timeEstimate}
+                                  <div className="flex flex-shrink-0 items-center space-x-3 text-xs">
+                                    {/* Dependencies (Original Look) */}
+                                    {task.dependencies &&
+                                      task.dependencies.length > 0 && (
+                                        <div className="hidden sm:flex items-center gap-1">
+                                          {task.dependencies.map((dep, idx) => (
+                                            <span
+                                              key={idx}
+                                              className="bg-zinc-900 text-zinc-500 border border-zinc-800 rounded px-1.5 py-0.5 text-[10px] font-bold"
+                                            >
+                                              {dep}
                                             </span>
-                                          )}
-                                          <button
-                                            onClick={(e) => {
-                                              e.stopPropagation();
-                                              setEditValue(subtask.title);
-                                              setEditingId(subtask.id);
-                                            }}
-                                            className="hover:text-[#F72585] text-zinc-600"
-                                          >
-                                            <Edit2 size={12} />
-                                          </button>
-                                          <button
-                                            onClick={(e) =>
-                                              deleteSubtask(
-                                                task.id,
-                                                subtask.id,
-                                                e,
-                                              )
-                                            }
-                                            className="hover:text-red-500 text-zinc-600"
-                                          >
-                                            <Trash2 size={12} />
-                                          </button>
+                                          ))}
                                         </div>
-                                      </div>
-                                    </div>
-                                  </li>
-                                ))}
-                              </ul>
-                            </motion.div>
-                          )}
-                        </AnimatePresence>
-                      </div>
-                    </Reorder.Item>
-                  );
-                })}
-              </Reorder.Group>
-            </LayoutGroup>
-          </div>
-        </div>
-      </div>
+                                      )}
 
-      {/* --- FLASHCARD SRS OVERLAY (TRUE 3D FLIP) --- */}
-      <AnimatePresence>
-        {showDeck && (
-          <motion.div
-            initial={{ opacity: 0 }}
-            animate={{ opacity: 1 }}
-            exit={{ opacity: 0 }}
-            className="fixed inset-0 z-50 flex items-center justify-center bg-[#050505]/95 backdrop-blur-md p-4"
-          >
-            <div className="w-full max-w-2xl relative">
-              <button
-                onClick={() => setShowDeck(false)}
-                className="absolute -top-12 right-0 text-zinc-500 hover:text-white"
-              >
-                <X size={24} />
-              </button>
+                                    {/* Agentic Trigger: Open Deck */}
+                                    <button
+                                      onClick={(e) => {
+                                        e.stopPropagation();
+                                        setActiveTaskTitle(task.title);
+                                        setShowDeck(true);
+                                      }}
+                                      className="flex items-center gap-1.5 px-3 py-1.5 bg-[#3A0CA3]/20 hover:bg-[#3A0CA3]/40 text-[#B5179E] border border-[#3A0CA3]/50 rounded-lg transition-all"
+                                    >
+                                      <BrainCircuit size={14} />{" "}
+                                      <span className="font-bold text-[10px] uppercase tracking-wider hidden sm:block">
+                                        Launch Deck
+                                      </span>
+                                    </button>
 
-              {cardQueue.length > 0 ? (
-                <>
-                  <div className="flex justify-between items-center text-[10px] font-black tracking-widest uppercase mb-4 text-[#F72585]">
-                    <span>Neural Retention Protocol</span>
-                    <span>Cards Remaining: {cardQueue.length}</span>
-                  </div>
+                                    {/* Status Badge */}
+                                    <span
+                                      className={cn(
+                                        "rounded px-2 py-1 font-bold text-[10px] uppercase tracking-wider",
+                                        isCompleted
+                                          ? "bg-emerald-500/10 text-emerald-500"
+                                          : task.status === "in-progress"
+                                            ? "bg-[#F72585]/10 text-[#F72585]"
+                                            : "bg-zinc-900 text-zinc-500",
+                                      )}
+                                    >
+                                      {task.status}
+                                    </span>
+                                  </div>
+                                </motion.div>
+                              </motion.div>
 
-                  {/* 3D PERSPECTIVE CONTAINER */}
-                  <div
-                    className="relative w-full h-[350px] sm:h-[450px]"
-                    style={{ perspective: "1500px" }}
-                  >
-                    <motion.div
-                      className="w-full h-full relative"
-                      initial={false}
-                      animate={{ rotateY: isFlipped ? 180 : 0 }}
-                      transition={{
-                        type: "spring",
-                        stiffness: 150,
-                        damping: 20,
-                      }}
-                      style={{ transformStyle: "preserve-3d" }}
-                    >
-                      {/* FRONT FACE (Question) */}
-                      <div
-                        onClick={() => !isFlipped && setIsFlipped(true)}
-                        className="absolute inset-0 w-full h-full bg-[#0a0a0c] border border-[#3A0CA3] shadow-[0_0_50px_rgba(86,11,173,0.2)] rounded-3xl p-8 sm:p-12 flex flex-col justify-center items-center text-center cursor-pointer"
-                        style={{ backfaceVisibility: "hidden" }}
-                      >
-                        <div className="text-xl sm:text-3xl font-medium text-white leading-tight">
-                          {cardQueue[0].front}
-                        </div>
-                        <div className="absolute bottom-6 left-0 right-0 text-[10px] text-[#560BAD] uppercase flex justify-center items-center gap-2 font-black tracking-widest">
-                          <span className="bg-zinc-900 px-2 py-1 rounded border border-zinc-800">
-                            SPACE
-                          </span>{" "}
-                          to flip
-                        </div>
-                      </div>
+                              {/* Subtasks (Original Dashed Line Architecture) */}
+                              <AnimatePresence mode="wait">
+                                {isExpanded && task.subtasks.length > 0 && (
+                                  <motion.div
+                                    className="relative overflow-hidden pl-2"
+                                    variants={subtaskListVariants}
+                                    initial="hidden"
+                                    animate="visible"
+                                    exit="hidden"
+                                    layout
+                                  >
+                                    {/* The connecting dashed line */}
+                                    <div className="absolute top-0 bottom-0 left-[22px] border-l-2 border-dashed border-zinc-800" />
 
-                      {/* BACK FACE (Answer) - Rotated 180 deg initially */}
-                      <div
-                        className="absolute inset-0 w-full h-full bg-[#0a0a0c] border border-[#F72585]/50 shadow-[0_0_50px_rgba(247,37,133,0.2)] rounded-3xl p-8 sm:p-12 flex flex-col overflow-hidden"
-                        style={{
-                          backfaceVisibility: "hidden",
-                          transform: "rotateY(180deg)",
-                        }}
-                      >
-                        <div className="text-sm text-[#B5179E] mb-6 pb-6 border-b border-[#3A0CA3]/50 font-medium text-center">
-                          {cardQueue[0].front}
-                        </div>
-                        <div className="text-lg sm:text-2xl text-zinc-100 leading-relaxed font-medium flex-1 overflow-y-auto custom-scrollbar flex items-center justify-center text-center">
-                          {cardQueue[0].back}
-                        </div>
-                      </div>
-                    </motion.div>
-                  </div>
+                                    <ul className="mt-2 mr-2 mb-2 ml-5 space-y-1">
+                                      {task.subtasks.map((subtask) => {
+                                        const subtaskKey = `${task.id}-${subtask.id}`;
+                                        const isSubtaskExpanded =
+                                          expandedSubtasks[subtaskKey];
 
-                  {/* SRS Action Buttons */}
-                  <div className="h-20 mt-6 relative">
-                    <AnimatePresence>
-                      {isFlipped && (
-                        <motion.div
-                          initial={{ opacity: 0, y: 10 }}
-                          animate={{ opacity: 1, y: 0 }}
-                          exit={{ opacity: 0, y: 10 }}
-                          className="flex flex-wrap sm:flex-nowrap justify-between gap-2 absolute inset-0"
-                        >
-                          {[
-                            {
-                              label: "AGAIN",
-                              key: "1",
-                              action: "again" as const,
-                              color:
-                                "hover:bg-red-500/20 hover:text-red-400 border-red-900/50",
-                            },
-                            {
-                              label: "HARD",
-                              key: "2",
-                              action: "hard" as const,
-                              color:
-                                "hover:bg-orange-500/20 hover:text-orange-400 border-orange-900/50",
-                            },
-                            {
-                              label: "GOOD",
-                              key: "3",
-                              action: "good" as const,
-                              color:
-                                "hover:bg-[#B5179E]/20 hover:text-[#B5179E] border-[#B5179E]/50",
-                            },
-                            {
-                              label: "EASY",
-                              key: "4",
-                              action: "easy" as const,
-                              color:
-                                "hover:bg-[#F72585]/20 hover:text-[#F72585] border-[#F72585]/50",
-                            },
-                          ].map((btn) => (
-                            <button
-                              key={btn.label}
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                handleScoreCard(btn.action);
-                              }}
-                              className={`flex-1 py-4 bg-[#0a0a0c] border ${btn.color} rounded-2xl text-[10px] sm:text-xs font-black tracking-widest text-zinc-500 transition-all flex flex-col items-center gap-1`}
-                            >
-                              <span className="text-[9px] bg-black/50 px-1.5 rounded">
-                                {btn.key}
-                              </span>
-                              {btn.label}
-                            </button>
-                          ))}
-                          <button
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              handleScoreCard("skip");
-                            }}
-                            className="flex-1 py-4 bg-[#0a0a0c] border hover:bg-zinc-800/50 border-zinc-800 rounded-2xl text-[10px] sm:text-xs font-black tracking-widest text-zinc-500 transition-all flex flex-col items-center gap-1"
-                          >
-                            <span className="text-[9px] bg-black/50 px-1.5 rounded">
-                              S
-                            </span>
-                            SKIP
-                          </button>
-                        </motion.div>
-                      )}
-                    </AnimatePresence>
-                  </div>
-                </>
-              ) : (
-                /* SUMMARY SCREEN */
-                <motion.div
-                  initial={{ scale: 0.9, opacity: 0 }}
-                  animate={{ scale: 1, opacity: 1 }}
-                  className="bg-[#0a0a0c] border border-[#F72585]/50 shadow-[0_0_50px_rgba(247,37,133,0.2)] rounded-3xl p-12 text-center relative overflow-hidden"
-                >
-                  <div className="absolute top-0 left-0 w-full h-2 bg-gradient-to-r from-[#3A0CA3] via-[#B5179E] to-[#F72585]" />
-                  <CheckCircle2
-                    size={64}
-                    className="mx-auto text-[#F72585] mb-6 drop-shadow-[0_0_15px_rgba(247,37,133,0.5)]"
-                  />
-                  <h2 className="text-3xl font-black text-white mb-2 tracking-[0.2em] uppercase">
-                    Deck Conquered
-                  </h2>
-                  <p className="text-zinc-400 mb-8">
-                    Atlas Neural Pathways Reinforced.
-                  </p>
+                                        return (
+                                          <motion.li
+                                            key={subtask.id}
+                                            className="group flex flex-col py-1 pl-6"
+                                            layout
+                                          >
+                                            <div
+                                              className="flex flex-1 items-center rounded-lg p-1.5 hover:bg-white/[0.02] cursor-pointer"
+                                              onClick={() =>
+                                                toggleSubtaskExpansion(
+                                                  task.id,
+                                                  subtask.id,
+                                                )
+                                              }
+                                            >
+                                              <div
+                                                className="mr-3 flex-shrink-0"
+                                                onClick={(e) => {
+                                                  e.stopPropagation();
+                                                  toggleSubtaskStatus(
+                                                    task.id,
+                                                    subtask.id,
+                                                  );
+                                                }}
+                                              >
+                                                {subtask.status ===
+                                                "completed" ? (
+                                                  <CheckCircle2 className="h-4 w-4 text-emerald-500" />
+                                                ) : (
+                                                  <Circle className="text-zinc-600 h-4 w-4" />
+                                                )}
+                                              </div>
+                                              <span
+                                                className={cn(
+                                                  "text-sm flex-1",
+                                                  subtask.status === "completed"
+                                                    ? "text-zinc-600 line-through"
+                                                    : "text-zinc-300",
+                                                )}
+                                              >
+                                                {subtask.title}
+                                              </span>
+                                            </div>
 
-                  <div className="flex justify-center gap-8 mb-10">
-                    <div className="text-center">
-                      <div className="text-4xl font-black text-[#560BAD]">
-                        {deckStats.total}
-                      </div>
-                      <div className="text-[10px] uppercase font-bold tracking-widest text-zinc-500 mt-1">
-                        Mastered
-                      </div>
+                                            <AnimatePresence mode="wait">
+                                              {isSubtaskExpanded && (
+                                                <motion.div
+                                                  className="text-zinc-500 border-l-2 border-dashed border-zinc-800 mt-2 ml-2 pl-5 text-sm overflow-hidden"
+                                                  initial={{
+                                                    height: 0,
+                                                    opacity: 0,
+                                                  }}
+                                                  animate={{
+                                                    height: "auto",
+                                                    opacity: 1,
+                                                  }}
+                                                  exit={{
+                                                    height: 0,
+                                                    opacity: 0,
+                                                  }}
+                                                  layout
+                                                >
+                                                  <p className="py-1">
+                                                    {subtask.description}
+                                                  </p>
+                                                  {subtask.tools &&
+                                                    subtask.tools.length >
+                                                      0 && (
+                                                      <div className="mt-2 mb-2 flex flex-wrap gap-2">
+                                                        <span className="text-xs font-bold text-zinc-600">
+                                                          MCP:
+                                                        </span>
+                                                        {subtask.tools.map(
+                                                          (tool, idx) => (
+                                                            <span
+                                                              key={idx}
+                                                              className="bg-zinc-900 border border-zinc-800 text-zinc-400 rounded px-2 py-0.5 text-[10px] font-bold"
+                                                            >
+                                                              {tool}
+                                                            </span>
+                                                          ),
+                                                        )}
+                                                      </div>
+                                                    )}
+                                                </motion.div>
+                                              )}
+                                            </AnimatePresence>
+                                          </motion.li>
+                                        );
+                                      })}
+                                    </ul>
+                                  </motion.div>
+                                )}
+                              </AnimatePresence>
+                            </motion.li>
+                          );
+                        })}
+                      </ul>
                     </div>
-                    <div className="text-center">
-                      <div className="text-4xl font-black text-[#B5179E]">
-                        {deckStats.reviews}
-                      </div>
-                      <div className="text-[10px] uppercase font-bold tracking-widest text-zinc-500 mt-1">
-                        Total Flips
-                      </div>
-                    </div>
-                  </div>
-
-                  <button
-                    onClick={() => setShowDeck(false)}
-                    className="px-8 py-4 bg-gradient-to-r from-[#7209B7] to-[#F72585] hover:to-white hover:text-black text-white font-black uppercase tracking-widest rounded-xl transition-all"
-                  >
-                    Return to Atlas Grid
-                  </button>
+                  </LayoutGroup>
                 </motion.div>
               )}
             </div>
-          </motion.div>
-        )}
-      </AnimatePresence>
+          </div>
+        </main>
+
+        {/* RIGHT SIDEBAR: FLASHCARDS */}
+        <AnimatePresence>
+          {showDeck && (
+            <motion.aside
+              initial={{ x: 400, opacity: 0 }}
+              animate={{ x: 0, opacity: 1 }}
+              exit={{ x: 400, opacity: 0 }}
+              transition={{ type: "spring", damping: 25, stiffness: 200 }}
+              className="fixed top-0 right-0 w-[400px] h-full bg-[#0a0a0c] border-l border-white/5 z-40 flex flex-col shadow-2xl"
+            >
+              <div className="p-6 border-b border-white/5 flex justify-between items-center bg-[#111113]">
+                <div className="text-[10px] font-black uppercase tracking-widest text-[#F72585]">
+                  Deck // {activeTaskTitle}
+                </div>
+                <button
+                  onClick={() => setShowDeck(false)}
+                  className="text-zinc-500 hover:text-white"
+                >
+                  <X size={20} />
+                </button>
+              </div>
+
+              <div className="flex-1 p-6 flex flex-col justify-center overflow-y-auto">
+                {cardQueue.length > 0 ? (
+                  <>
+                    <div className="text-right text-[10px] font-bold text-zinc-500 mb-4">
+                      {cardQueue.length} Cards Remaining
+                    </div>
+
+                    {/* Flashcard Body */}
+                    <div
+                      className="w-full h-[400px] relative cursor-pointer"
+                      onClick={() => setIsFlipped(!isFlipped)}
+                    >
+                      <motion.div
+                        animate={{ rotateY: isFlipped ? 180 : 0 }}
+                        transition={{
+                          type: "spring",
+                          stiffness: 200,
+                          damping: 20,
+                        }}
+                        className="w-full h-full relative"
+                        style={{ transformStyle: "preserve-3d" }}
+                      >
+                        {/* Front */}
+                        <div
+                          className="absolute inset-0 bg-zinc-900 border border-[#3A0CA3]/50 rounded-3xl p-8 flex flex-col items-center justify-center text-center"
+                          style={{ backfaceVisibility: "hidden" }}
+                        >
+                          <div className="text-xl font-medium text-white">
+                            {cardQueue[0].front}
+                          </div>
+                          <div className="absolute bottom-6 text-[10px] text-zinc-500 uppercase font-bold">
+                            Click or press Space to flip
+                          </div>
+                        </div>
+                        {/* Back */}
+                        <div
+                          className="absolute inset-0 bg-zinc-900 border border-[#F72585]/50 rounded-3xl p-8 flex flex-col items-center justify-center text-center"
+                          style={{
+                            backfaceVisibility: "hidden",
+                            transform: "rotateY(180deg)",
+                          }}
+                        >
+                          <div className="text-lg text-zinc-100 font-medium">
+                            {cardQueue[0].back}
+                          </div>
+                        </div>
+                      </motion.div>
+                    </div>
+
+                    {/* Anki Controls */}
+                    <div className="mt-8 grid grid-cols-4 gap-2">
+                      {["again", "hard", "good", "easy"].map((type) => (
+                        <button
+                          key={type}
+                          onClick={() => handleScoreCard(type)}
+                          className="py-3 rounded-xl bg-zinc-900 border border-white/5 hover:border-white/20 text-[10px] font-black uppercase text-zinc-400 hover:text-white transition-all"
+                        >
+                          {type}
+                        </button>
+                      ))}
+                    </div>
+                  </>
+                ) : (
+                  <div className="text-center p-8 bg-zinc-900 border border-[#F72585]/30 rounded-3xl">
+                    <CheckCircle2
+                      size={48}
+                      className="mx-auto text-[#F72585] mb-4"
+                    />
+                    <h3 className="text-xl font-bold text-white mb-2">
+                      Deck Mastered
+                    </h3>
+                    <button
+                      onClick={() => setShowDeck(false)}
+                      className="mt-6 px-6 py-2 bg-[#F72585] text-white font-bold rounded-lg text-sm"
+                    >
+                      Close Deck
+                    </button>
+                  </div>
+                )}
+              </div>
+            </motion.aside>
+          )}
+        </AnimatePresence>
+      </div>
     </div>
+  );
+}
+
+function ActionButton({
+  icon,
+  label,
+  onClick,
+}: {
+  icon: React.ReactNode;
+  label: string;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      onClick={onClick}
+      className="flex items-center gap-2 px-4 py-2 bg-[#111113] hover:bg-zinc-800 rounded-full border border-white/10 text-zinc-400 hover:text-white transition-colors"
+    >
+      {icon} <span className="text-xs font-medium">{label}</span>
+    </button>
   );
 }
